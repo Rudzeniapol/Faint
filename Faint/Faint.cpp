@@ -1,31 +1,26 @@
 ﻿#define _USE_MATH_DEFINES
+#define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
+#include <commdlg.h>
 #include <gdiplus.h>
 #include <vector>
 #include <string>
 #include <cmath>
-#include <sstream>
-#include <stack>
-#include <map>
-#include <functional>
 #include <algorithm>
+#include <sstream>
 
 // Подключение библиотек
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "advapi32.lib")
-
-// Включение визуальных стилей (для красивых кнопок в диалогах)
-#pragma comment(linker,"\"/manifestdependency:type='win32' \
-name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
-processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#pragma comment(lib, "comdlg32.lib")
 
 using namespace Gdiplus;
 using namespace std;
 
 // -------------------------------------------------------------------------
-// 1. Глобальные константы и идентификаторы
+// 1. Константы и ID
 // -------------------------------------------------------------------------
 #define ID_TOOL_PEN       1001
 #define ID_TOOL_LINE      1002
@@ -34,28 +29,36 @@ using namespace std;
 #define ID_TOOL_FUNC      1005
 #define ID_TOOL_ERASER    1006
 #define ID_ACTION_CLEAR   1007
-#define ID_ACTION_AUTORUN 1008
+#define ID_ACTION_SAVE    1008
+#define ID_ACTION_COLOR   1009
+#define ID_ACTION_AUTORUN 1010
+
+// Размеры ластика (должны идти по порядку для RadioItem)
+#define ID_ERASER_XS      1101
+#define ID_ERASER_S       1102
+#define ID_ERASER_M       1103
+#define ID_ERASER_L       1104
+#define ID_ERASER_XL      1105
+
 #define ID_BTN_OK         2001
 #define ID_BTN_CANCEL     2002
+#define ID_CHK_AXIS       2003
+#define ID_CHK_CLIP       2004
 
-// Мьютек для защиты от повторного запуска
-const wchar_t* MUTEX_NAME = L"Global\\MyGDIPlusPaintMutex_v1";
+const wchar_t* MUTEX_NAME = L"Global\\MyGDIPlusPaintMutex_UltraV4";
 const wchar_t* REG_PATH = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const wchar_t* APP_NAME = L"MyGDIPlusPaint";
 
 // -------------------------------------------------------------------------
-// 2. Математический парсер (Упрощенный)
-// Поддерживает +, -, *, /, sin, cos, x, числа
+// 2. Математический парсер
 // -------------------------------------------------------------------------
 class MathParser {
 public:
     static double Evaluate(string expr, double x) {
-        // Удаляем пробелы
         expr.erase(remove(expr.begin(), expr.end(), ' '), expr.end());
         size_t pos = 0;
         return ParseExpression(expr, pos, x);
     }
-
 private:
     static double ParseExpression(const string& expr, size_t& pos, double x) {
         double left = ParseTerm(expr, pos, x);
@@ -64,28 +67,38 @@ private:
             if (op != '+' && op != '-') break;
             pos++;
             double right = ParseTerm(expr, pos, x);
-            if (op == '+') left += right;
-            else left -= right;
+            if (op == '+') left += right; else left -= right;
         }
         return left;
     }
-
     static double ParseTerm(const string& expr, size_t& pos, double x) {
-        double left = ParseFactor(expr, pos, x);
+        double left = ParsePower(expr, pos, x);
         while (pos < expr.length()) {
             char op = expr[pos];
             if (op != '*' && op != '/') break;
             pos++;
-            double right = ParseFactor(expr, pos, x);
-            if (op == '*') left *= right;
-            else if (right != 0) left /= right;
+            double right = ParsePower(expr, pos, x);
+            if (op == '*') left *= right; else if (right != 0) left /= right;
         }
         return left;
     }
-
+    static double ParsePower(const string& expr, size_t& pos, double x) {
+        double left = ParseFactor(expr, pos, x);
+        while (pos < expr.length()) {
+            if (expr[pos] == '^') {
+                pos++;
+                double right = ParseFactor(expr, pos, x);
+                left = pow(left, right);
+            }
+            else {
+                break;
+            }
+        }
+        return left;
+    }
     static double ParseFactor(const string& expr, size_t& pos, double x) {
         if (pos >= expr.length()) return 0;
-
+        if (expr[pos] == '-') { pos++; return -ParseFactor(expr, pos, x); }
         if (expr[pos] == '(') {
             pos++;
             double val = ParseExpression(expr, pos, x);
@@ -96,20 +109,24 @@ private:
             string func;
             while (pos < expr.length() && isalpha(expr[pos])) func += expr[pos++];
             if (func == "x") return x;
+            if (func == "pi") return M_PI;
+            if (func == "e") return M_E;
             if (pos < expr.length() && expr[pos] == '(') {
                 pos++;
                 double val = ParseExpression(expr, pos, x);
                 if (pos < expr.length() && expr[pos] == ')') pos++;
                 if (func == "sin") return sin(val);
                 if (func == "cos") return cos(val);
+                if (func == "tan") return tan(val);
+                if (func == "sqrt") return sqrt(abs(val));
+                if (func == "abs") return abs(val);
+                if (func == "log") return log(val);
+                if (func == "ln") return log(val);
             }
         }
-        if (isdigit(expr[pos]) || expr[pos] == '.' || expr[pos] == '-') {
+        if (isdigit(expr[pos]) || expr[pos] == '.') {
             string numStr;
-            if (expr[pos] == '-') numStr += expr[pos++];
-            while (pos < expr.length() && (isdigit(expr[pos]) || expr[pos] == '.')) {
-                numStr += expr[pos++];
-            }
+            while (pos < expr.length() && (isdigit(expr[pos]) || expr[pos] == '.')) numStr += expr[pos++];
             return stod(numStr);
         }
         return 0;
@@ -119,8 +136,6 @@ private:
 // -------------------------------------------------------------------------
 // 3. Классы фигур
 // -------------------------------------------------------------------------
-enum ShapeType { SHAPE_PEN, SHAPE_LINE, SHAPE_RECT, SHAPE_ELLIPSE, SHAPE_FUNC };
-
 class Shape {
 public:
     Color color;
@@ -132,22 +147,23 @@ public:
 
 class PenShape : public Shape {
 public:
-    std::vector<Point> points;
+    std::vector<PointF> points;
     PenShape(Color c, float w) : Shape(c, w) {}
-    void AddPoint(Point p) { points.push_back(p); }
+    void AddPoint(PointF p) { points.push_back(p); }
     void Draw(Graphics& g) override {
         if (points.size() < 2) return;
         Pen pen(color, width);
         pen.SetStartCap(LineCapRound);
         pen.SetEndCap(LineCapRound);
+        pen.SetLineJoin(LineJoinRound);
         g.DrawCurve(&pen, points.data(), (INT)points.size());
     }
 };
 
 class LineShape : public Shape {
 public:
-    Point start, end;
-    LineShape(Point s, Point e, Color c, float w) : Shape(c, w), start(s), end(e) {}
+    PointF start, end;
+    LineShape(PointF s, PointF e, Color c, float w) : Shape(c, w), start(s), end(e) {}
     void Draw(Graphics& g) override {
         Pen pen(color, width);
         g.DrawLine(&pen, start, end);
@@ -156,8 +172,8 @@ public:
 
 class RectShape : public Shape {
 public:
-    Rect rect;
-    RectShape(Rect r, Color c, float w) : Shape(c, w), rect(r) {}
+    RectF rect;
+    RectShape(RectF r, Color c, float w) : Shape(c, w), rect(r) {}
     void Draw(Graphics& g) override {
         Pen pen(color, width);
         g.DrawRectangle(&pen, rect);
@@ -166,8 +182,8 @@ public:
 
 class EllipseShape : public Shape {
 public:
-    Rect rect;
-    EllipseShape(Rect r, Color c, float w) : Shape(c, w), rect(r) {}
+    RectF rect;
+    EllipseShape(RectF r, Color c, float w) : Shape(c, w), rect(r) {}
     void Draw(Graphics& g) override {
         Pen pen(color, width);
         g.DrawEllipse(&pen, rect);
@@ -178,47 +194,110 @@ class FunctionShape : public Shape {
 public:
     string expression;
     double rangeStart, rangeEnd;
-    Point origin;
+    PointF origin;
+    bool drawAxes;
+    bool clipToRange;
 
-    FunctionShape(string expr, double start, double end, Point org, Color c, float w)
-        : Shape(c, w), expression(expr), rangeStart(start), rangeEnd(end), origin(org) {
+    FunctionShape(string expr, double start, double end, PointF org, Color c, float w, bool axes, bool clip)
+        : Shape(c, w), expression(expr), rangeStart(start), rangeEnd(end), origin(org), drawAxes(axes), clipToRange(clip) {
     }
 
     void Draw(Graphics& g) override {
         Pen pen(color, width);
 
-        // Рисуем оси (с прозрачностью)
-        Pen axisPen(Color(100, 0, 0, 0), 1);
-        g.DrawLine(&axisPen, Point(origin.X - 1000, origin.Y), Point(origin.X + 1000, origin.Y)); // X
-        g.DrawLine(&axisPen, Point(origin.X, origin.Y - 1000), Point(origin.X, origin.Y + 1000)); // Y
+        // --- 1. Отрисовка осей ---
+        if (drawAxes) {
+            Pen axisPen(Color(200, 0, 0, 0), 1);
+            Font font(L"Arial", 8);
+            SolidBrush brush(Color(200, 0, 0, 0));
 
-        std::vector<PointF> pnts;
-        // Шаг отрисовки
-        double step = 1.0;
-        for (double xPix = -500; xPix <= 500; xPix += step) {
-            // Логический x относительно начала координат
-            // Масштаб: 1 пиксель = 1 единица (можно усложнить)
-            double xVal = xPix;
+            // Рисуем очень длинные оси
+            g.DrawLine(&axisPen, PointF(origin.X - 100000, origin.Y), PointF(origin.X + 100000, origin.Y));
+            g.DrawLine(&axisPen, PointF(origin.X, origin.Y - 100000), PointF(origin.X, origin.Y + 100000));
 
-            if (xVal < rangeStart || xVal > rangeEnd) continue;
-
-            double yVal = MathParser::Evaluate(expression, xVal);
-
-            // Инвертируем Y, так как на экране Y растет вниз
-            float screenX = (float)origin.X + (float)xPix;
-            float screenY = (float)origin.Y - (float)yVal;
-
-            pnts.push_back(PointF(screenX, screenY));
+            // Сетка и цифры (рисуем в разумных пределах вокруг Origin, чтобы не перегружать GDI)
+            double step = 50.0;
+            for (double x = -3000; x <= 3000; x += step) {
+                if (x == 0) continue;
+                float screenX = origin.X + (float)x;
+                g.DrawLine(&axisPen, PointF(screenX, origin.Y - 3), PointF(screenX, origin.Y + 3));
+                wstring s = to_wstring((int)x);
+                g.DrawString(s.c_str(), -1, &font, PointF(screenX - 10, origin.Y + 5), &brush);
+            }
+            for (double y = -3000; y <= 3000; y += step) {
+                if (y == 0) continue;
+                float screenY = origin.Y - (float)y;
+                g.DrawLine(&axisPen, PointF(origin.X - 3, screenY), PointF(origin.X + 3, screenY));
+                wstring s = to_wstring((int)y);
+                g.DrawString(s.c_str(), -1, &font, PointF(origin.X + 5, screenY - 6), &brush);
+            }
         }
 
-        if (pnts.size() > 1) {
-            g.DrawLines(&pen, pnts.data(), (INT)pnts.size());
+        // --- 2. Определение границ отрисовки ---
+        double start, end;
+
+        if (clipToRange) {
+            // Если ограничение ВКЛЮЧЕНО: строго соблюдаем границы пользователя
+            start = min(rangeStart, rangeEnd);
+            end = max(rangeStart, rangeEnd);
+
+            // Устанавливаем Clipping Region для GDI+, чтобы обрезать "хвосты" линий и толщину кисти
+            // RectF задается в координатах мира (так как у нас применена трансформация в Graphics)
+            RectF clipRect((float)(origin.X + start), (float)(origin.Y - 100000), (float)(end - start), 200000.0f);
+            g.SetClip(clipRect, CombineModeIntersect);
+        }
+        else {
+            // Если ограничение ВЫКЛЮЧЕНО: рисуем очень далеко, чтобы при зуме/сдвиге график был
+            start = -50000.0;
+            end = 50000.0;
+            // Clipping не нужен
+        }
+
+        // --- 3. Вычисление и отрисовка ---
+        double step = 0.5;
+        std::vector<std::vector<PointF>> segments;
+        std::vector<PointF> currentSegment;
+
+        for (double xPix = start; xPix <= end; xPix += step) {
+            double yVal = MathParser::Evaluate(expression, xPix);
+
+            // Игнорируем ошибки математики
+            if (isnan(yVal) || isinf(yVal)) {
+                if (!currentSegment.empty()) { segments.push_back(currentSegment); currentSegment.clear(); }
+                continue;
+            }
+
+            float screenX = origin.X + (float)xPix;
+            float screenY = origin.Y - (float)yVal;
+
+            // Разрыв линий при резких скачках (асимптоты)
+            if (!currentSegment.empty()) {
+                float lastY = currentSegment.back().Y;
+                if (abs(screenY - lastY) > 2000.0f) {
+                    segments.push_back(currentSegment);
+                    currentSegment.clear();
+                }
+            }
+
+            currentSegment.push_back(PointF(screenX, screenY));
+        }
+        if (!currentSegment.empty()) segments.push_back(currentSegment);
+
+        for (const auto& seg : segments) {
+            if (seg.size() > 1) {
+                g.DrawLines(&pen, seg.data(), (INT)seg.size());
+            }
+        }
+
+        // Сброс ограничения области
+        if (clipToRange) {
+            g.ResetClip();
         }
     }
 };
 
 // -------------------------------------------------------------------------
-// 4. Состояние приложения
+// 4. Глобальное состояние
 // -------------------------------------------------------------------------
 enum Tool { T_PEN, T_LINE, T_RECT, T_ELLIPSE, T_ERASER, T_FUNC_PREPARE, T_FUNC_PLACE };
 
@@ -226,21 +305,59 @@ struct AppState {
     Tool currentTool = T_PEN;
     Color currentColor = Color(255, 0, 0, 0);
     float currentWidth = 2.0f;
+    float eraserSize = 20.0f;
+    int eraserMenuID = ID_ERASER_M; // ID текущего пункта меню ластика для галочки
     std::vector<Shape*> shapes;
     bool isDrawing = false;
-    Point startPoint;
-    Point currentPoint;
+    bool isPanning = false;
 
-    // Для функции
+    PointF startPoint;
+    PointF currentPoint;
+    Point lastMousePos;
+
     string funcExpr;
-    double funcStart, funcEnd;
+    double funcStart = -300, funcEnd = 300;
+    bool funcShowAxes = true;
+    bool funcClip = true;
 
-    // Undo/Redo можно реализовать через стеки, но для краткости опустим полный стек redo
+    float zoom = 1.0f;
+    float offsetX = 0.0f;
+    float offsetY = 0.0f;
 } appState;
 
+struct FuncParams {
+    wchar_t expr[256];
+    wchar_t rangeStart[20];
+    wchar_t rangeEnd[20];
+    BOOL showAxes;
+    BOOL clipRange;
+    BOOL resultOK;
+} g_FuncParams;
+
 // -------------------------------------------------------------------------
-// 5. Вспомогательные функции (Реестр, Диалог ввода)
+// 5. Вспомогательные функции
 // -------------------------------------------------------------------------
+int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
+    UINT  num = 0; UINT  size = 0;
+    GetImageEncodersSize(&num, &size);
+    if (size == 0) return -1;
+    ImageCodecInfo* pImageCodecInfo = (ImageCodecInfo*)(malloc(size));
+    if (pImageCodecInfo == NULL) return -1;
+    GetImageEncoders(num, size, pImageCodecInfo);
+    for (UINT j = 0; j < num; ++j) {
+        if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0) {
+            *pClsid = pImageCodecInfo[j].Clsid;
+            free(pImageCodecInfo);
+            return j;
+        }
+    }
+    free(pImageCodecInfo);
+    return -1;
+}
+
+PointF ScreenToWorld(int sx, int sy) {
+    return PointF((sx - appState.offsetX) / appState.zoom, (sy - appState.offsetY) / appState.zoom);
+}
 
 void SetAutorun(bool enable) {
     HKEY hKey;
@@ -257,133 +374,150 @@ void SetAutorun(bool enable) {
     }
 }
 
-// Простая структура для передачи данных в диалог
-struct FuncParams {
-    wchar_t expr[256];
-    wchar_t rangeStart[20];
-    wchar_t rangeEnd[20];
-};
+void SelectColor(HWND hWnd) {
+    CHOOSECOLOR cc;
+    static COLORREF acrCustClr[16];
+    ZeroMemory(&cc, sizeof(cc));
+    cc.lStructSize = sizeof(cc);
+    cc.hwndOwner = hWnd;
+    cc.lpCustColors = (LPDWORD)acrCustClr;
+    cc.rgbResult = RGB(appState.currentColor.GetR(), appState.currentColor.GetG(), appState.currentColor.GetB());
+    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+    if (ChooseColor(&cc)) {
+        appState.currentColor = Color(255, GetRValue(cc.rgbResult), GetGValue(cc.rgbResult), GetBValue(cc.rgbResult));
+    }
+}
 
-FuncParams g_FuncParams;
-
-// Процедура диалогового окна (создаем вручную без ресурсов .rc для портативности кода)
+// -------------------------------------------------------------------------
+// 6. Диалог
+// -------------------------------------------------------------------------
 LRESULT CALLBACK InputDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    static HWND hEditExpr, hEditStart, hEditEnd;
+    static HWND hEditExpr, hEditStart, hEditEnd, hChkAxis, hChkClip;
     switch (msg) {
     case WM_CREATE:
-        CreateWindow(L"STATIC", L"f(x) =", WS_VISIBLE | WS_CHILD, 10, 10, 50, 20, hWnd, NULL, NULL, NULL);
-        hEditExpr = CreateWindow(L"EDIT", L"sin(x/20)*50", WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL, 70, 10, 200, 20, hWnd, NULL, NULL, NULL);
+        CreateWindow(L"STATIC", L"f(x) =", WS_VISIBLE | WS_CHILD, 10, 15, 40, 20, hWnd, NULL, NULL, NULL);
+        hEditExpr = CreateWindow(L"EDIT", L"x^2", WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL, 60, 12, 210, 20, hWnd, NULL, NULL, NULL);
 
-        CreateWindow(L"STATIC", L"От:", WS_VISIBLE | WS_CHILD, 10, 40, 30, 20, hWnd, NULL, NULL, NULL);
-        hEditStart = CreateWindow(L"EDIT", L"-300", WS_VISIBLE | WS_CHILD | WS_BORDER, 50, 40, 80, 20, hWnd, NULL, NULL, NULL);
+        CreateWindow(L"STATIC", L"Диапазон X:", WS_VISIBLE | WS_CHILD, 10, 45, 80, 20, hWnd, NULL, NULL, NULL);
+        hEditStart = CreateWindow(L"EDIT", L"-300", WS_VISIBLE | WS_CHILD | WS_BORDER, 90, 45, 60, 20, hWnd, NULL, NULL, NULL);
+        hEditEnd = CreateWindow(L"EDIT", L"300", WS_VISIBLE | WS_CHILD | WS_BORDER, 160, 45, 60, 20, hWnd, NULL, NULL, NULL);
 
-        CreateWindow(L"STATIC", L"До:", WS_VISIBLE | WS_CHILD, 150, 40, 30, 20, hWnd, NULL, NULL, NULL);
-        hEditEnd = CreateWindow(L"EDIT", L"300", WS_VISIBLE | WS_CHILD | WS_BORDER, 190, 40, 80, 20, hWnd, NULL, NULL, NULL);
+        hChkAxis = CreateWindow(L"BUTTON", L"Рисовать оси координат и сетку", WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX, 10, 75, 260, 20, hWnd, (HMENU)ID_CHK_AXIS, NULL, NULL);
+        CheckDlgButton(hWnd, ID_CHK_AXIS, BST_CHECKED);
 
-        CreateWindow(L"BUTTON", L"OK", WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON, 50, 80, 80, 25, hWnd, (HMENU)ID_BTN_OK, NULL, NULL);
-        CreateWindow(L"BUTTON", L"Отмена", WS_VISIBLE | WS_CHILD, 150, 80, 80, 25, hWnd, (HMENU)ID_BTN_CANCEL, NULL, NULL);
+        hChkClip = CreateWindow(L"BUTTON", L"Ограничить функцию диапазоном", WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX, 10, 100, 260, 20, hWnd, (HMENU)ID_CHK_CLIP, NULL, NULL);
+        CheckDlgButton(hWnd, ID_CHK_CLIP, BST_CHECKED);
+
+        CreateWindow(L"BUTTON", L"OK", WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON, 50, 140, 80, 25, hWnd, (HMENU)ID_BTN_OK, NULL, NULL);
+        CreateWindow(L"BUTTON", L"Отмена", WS_VISIBLE | WS_CHILD, 150, 140, 80, 25, hWnd, (HMENU)ID_BTN_CANCEL, NULL, NULL);
         break;
     case WM_COMMAND:
         if (LOWORD(wParam) == ID_BTN_OK) {
             GetWindowText(hEditExpr, g_FuncParams.expr, 256);
             GetWindowText(hEditStart, g_FuncParams.rangeStart, 20);
             GetWindowText(hEditEnd, g_FuncParams.rangeEnd, 20);
-            PostMessage(hWnd, WM_CLOSE, 0, 0);
-            EndDialog(hWnd, IDOK); // Эмуляция
+            g_FuncParams.showAxes = IsDlgButtonChecked(hWnd, ID_CHK_AXIS);
+            g_FuncParams.clipRange = IsDlgButtonChecked(hWnd, ID_CHK_CLIP);
+            g_FuncParams.resultOK = TRUE;
             DestroyWindow(hWnd);
         }
         else if (LOWORD(wParam) == ID_BTN_CANCEL) {
+            g_FuncParams.resultOK = FALSE;
             DestroyWindow(hWnd);
         }
         break;
-    default:
-        return DefWindowProc(hWnd, msg, wParam, lParam);
+    case WM_CLOSE:
+        g_FuncParams.resultOK = FALSE;
+        DestroyWindow(hWnd);
+        break;
+    default: return DefWindowProc(hWnd, msg, wParam, lParam);
     }
     return 0;
 }
 
 void ShowFuncDialog(HWND hParent) {
-    // Регистрируем класс для диалога
     WNDCLASS wc = { 0 };
     wc.lpfnWndProc = InputDialogProc;
     wc.hInstance = GetModuleHandle(NULL);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.lpszClassName = L"FuncDialogClass";
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW);
+    wc.lpszClassName = L"FuncDlg";
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClass(&wc);
 
-    HWND hDlg = CreateWindowEx(WS_EX_DLGMODALFRAME, L"FuncDialogClass", L"Параметры функции",
-        WS_VISIBLE | WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        100, 100, 300, 150, hParent, NULL, GetModuleHandle(NULL), NULL);
+    g_FuncParams.resultOK = FALSE;
 
-    // Центрируем
-    RECT rcParent, rcDlg;
-    GetWindowRect(hParent, &rcParent);
-    GetWindowRect(hDlg, &rcDlg);
-    int x = rcParent.left + (rcParent.right - rcParent.left) / 2 - (rcDlg.right - rcDlg.left) / 2;
-    int y = rcParent.top + (rcParent.bottom - rcParent.top) / 2 - (rcDlg.bottom - rcDlg.top) / 2;
-    SetWindowPos(hDlg, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    HWND hDlg = CreateWindowEx(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST, L"FuncDlg", L"Параметры функции",
+        WS_VISIBLE | WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 300, 220, hParent, NULL, GetModuleHandle(NULL), NULL);
 
-    // Модальный цикл
+    RECT rcP, rcD; GetWindowRect(hParent, &rcP); GetWindowRect(hDlg, &rcD);
+    SetWindowPos(hDlg, NULL, rcP.left + (rcP.right - rcP.left) / 2 - (rcD.right - rcD.left) / 2,
+        rcP.top + (rcP.bottom - rcP.top) / 2 - (rcD.bottom - rcD.top) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
     EnableWindow(hParent, FALSE);
+
     MSG msg;
-    while (IsWindow(hDlg) && GetMessage(&msg, NULL, 0, 0)) {
+    bool done = false;
+    while (!done && GetMessage(&msg, NULL, 0, 0)) {
+        if (!IsWindow(hDlg)) {
+            done = true;
+            break;
+        }
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN) {
+            SendMessage(hDlg, WM_COMMAND, ID_BTN_OK, 0);
+        }
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+
     EnableWindow(hParent, TRUE);
     SetForegroundWindow(hParent);
-
-    // Парсим результат если окно закрылось успешно (тут упрощено, берем из глобальной структуры)
-    if (lstrlen(g_FuncParams.expr) > 0) {
-        // Конвертация WCHAR -> string
-        char buf[256];
-        WideCharToMultiByte(CP_ACP, 0, g_FuncParams.expr, -1, buf, 256, NULL, NULL);
-        appState.funcExpr = string(buf);
-        appState.funcStart = _wtof(g_FuncParams.rangeStart);
-        appState.funcEnd = _wtof(g_FuncParams.rangeEnd);
-
-        // Переход в режим выбора точки
-        appState.currentTool = T_FUNC_PLACE;
-    }
 }
 
 // -------------------------------------------------------------------------
-// 6. Основное окно и отрисовка
+// 7. WndProc
 // -------------------------------------------------------------------------
-
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    static ULONG_PTR gdiplusToken;
-    static GdiplusStartupInput gdiplusStartupInput;
-
-    // Двойная буферизация
-    static HDC hdcMem = NULL;
-    static HBITMAP hbmMem = NULL;
-    static HBITMAP hbmOld = NULL;
+    static ULONG_PTR gdiToken;
+    static GdiplusStartupInput gdiInput;
+    static HDC hdcMem;
+    static HBITMAP hbmMem, hbmOld;
     static int cxClient, cyClient;
 
     switch (msg) {
     case WM_CREATE: {
-        GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
+        GdiplusStartup(&gdiToken, &gdiInput, NULL);
 
-        // Создание меню
         HMENU hMenu = CreateMenu();
         HMENU hFile = CreatePopupMenu();
+        AppendMenu(hFile, MF_STRING, ID_ACTION_SAVE, L"Сохранить как... (Ctrl+S)");
         AppendMenu(hFile, MF_STRING, ID_ACTION_AUTORUN, L"Автозапуск вкл/выкл");
+        AppendMenu(hFile, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFile, MF_STRING, ID_ACTION_CLEAR, L"Очистить (Ctrl+N)");
         AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFile, L"Файл");
 
         HMENU hTools = CreatePopupMenu();
-        AppendMenu(hTools, MF_STRING, ID_TOOL_PEN, L"Кисть");
-        AppendMenu(hTools, MF_STRING, ID_TOOL_LINE, L"Линия");
-        AppendMenu(hTools, MF_STRING, ID_TOOL_RECT, L"Прямоугольник");
-        AppendMenu(hTools, MF_STRING, ID_TOOL_ELLIPSE, L"Эллипс");
-        AppendMenu(hTools, MF_STRING, ID_TOOL_ERASER, L"Ластик");
-        AppendMenu(hTools, MF_SEPARATOR, 0, NULL);
+        AppendMenu(hTools, MF_STRING, ID_TOOL_PEN, L"Кисть (Ctrl+P)");
+        AppendMenu(hTools, MF_STRING, ID_TOOL_LINE, L"Линия (Ctrl+L)");
+        AppendMenu(hTools, MF_STRING, ID_TOOL_RECT, L"Прямоугольник (Ctrl+R)");
+        AppendMenu(hTools, MF_STRING, ID_TOOL_ELLIPSE, L"Эллипс (Ctrl+E)");
         AppendMenu(hTools, MF_STRING, ID_TOOL_FUNC, L"График функции (Ctrl+F)");
-        AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hTools, L"Инструменты");
 
+        HMENU hEraserSz = CreatePopupMenu();
+        AppendMenu(hEraserSz, MF_STRING, ID_ERASER_XS, L"Очень маленький (5px)");
+        AppendMenu(hEraserSz, MF_STRING, ID_ERASER_S, L"Маленький (10px)");
+        AppendMenu(hEraserSz, MF_STRING, ID_ERASER_M, L"Средний (20px)");
+        AppendMenu(hEraserSz, MF_STRING, ID_ERASER_L, L"Большой (40px)");
+        AppendMenu(hEraserSz, MF_STRING, ID_ERASER_XL, L"Огромный (80px)");
+
+        AppendMenu(hTools, MF_POPUP, (UINT_PTR)hEraserSz, L"Размер ластика");
+        AppendMenu(hTools, MF_STRING, ID_TOOL_ERASER, L"Ластик (Ctrl+D)");
+
+        AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hTools, L"Инструменты");
+        AppendMenu(hMenu, MF_STRING, ID_ACTION_COLOR, L"Цвет");
         SetMenu(hWnd, hMenu);
+
+        // Устанавливаем начальную точку напротив выбранного ластика (Medium)
+        CheckMenuRadioItem(hMenu, ID_ERASER_XS, ID_ERASER_XL, ID_ERASER_M, MF_BYCOMMAND);
         break;
     }
 
@@ -391,7 +525,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         cxClient = LOWORD(lParam);
         cyClient = HIWORD(lParam);
 
-        // Пересоздаем буфер
         if (hbmMem) DeleteObject(hbmMem);
         if (hdcMem) DeleteDC(hdcMem);
 
@@ -399,38 +532,115 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         hdcMem = CreateCompatibleDC(hdc);
         hbmMem = CreateCompatibleBitmap(hdc, cxClient, cyClient);
         hbmOld = (HBITMAP)SelectObject(hdcMem, hbmMem);
-
-        // Заливаем белым
-        RECT rc = { 0, 0, cxClient, cyClient };
-        FillRect(hdcMem, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
-
         ReleaseDC(hWnd, hdc);
         break;
     }
 
+    case WM_MOUSEWHEEL: {
+        int zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+        POINT pt; GetCursorPos(&pt); ScreenToClient(hWnd, &pt);
+
+        float scaleFactor = (zDelta > 0) ? 1.1f : 0.9f;
+        float oldZoom = appState.zoom;
+
+        if (oldZoom * scaleFactor < 0.1f) scaleFactor = 1.0f;
+        if (oldZoom * scaleFactor > 50.0f) scaleFactor = 1.0f;
+
+        appState.zoom *= scaleFactor;
+        appState.offsetX = (float)pt.x - ((float)pt.x - appState.offsetX) * scaleFactor;
+        appState.offsetY = (float)pt.y - ((float)pt.y - appState.offsetY) * scaleFactor;
+
+        InvalidateRect(hWnd, NULL, FALSE);
+        break;
+    }
+
+    case WM_MBUTTONDOWN: {
+        appState.isPanning = true;
+        appState.lastMousePos.X = LOWORD(lParam);
+        appState.lastMousePos.Y = HIWORD(lParam);
+        SetCapture(hWnd);
+        SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+        break;
+    }
+
+    case WM_MBUTTONUP:
+        if (appState.isPanning) {
+            appState.isPanning = false;
+            ReleaseCapture();
+            SetCursor(LoadCursor(NULL, IDC_ARROW));
+        }
+        break;
+
     case WM_COMMAND: {
         int id = LOWORD(wParam);
+
+        // Обработка выбора размера ластика для установки галочки (RadioItem)
+        if (id >= ID_ERASER_XS && id <= ID_ERASER_XL) {
+            appState.eraserMenuID = id;
+            CheckMenuRadioItem(GetMenu(hWnd), ID_ERASER_XS, ID_ERASER_XL, id, MF_BYCOMMAND);
+        }
+
         switch (id) {
         case ID_TOOL_PEN: appState.currentTool = T_PEN; break;
         case ID_TOOL_LINE: appState.currentTool = T_LINE; break;
         case ID_TOOL_RECT: appState.currentTool = T_RECT; break;
         case ID_TOOL_ELLIPSE: appState.currentTool = T_ELLIPSE; break;
         case ID_TOOL_ERASER: appState.currentTool = T_ERASER; break;
-        case ID_TOOL_FUNC:
-            g_FuncParams.expr[0] = 0; // Сброс
+
+        case ID_ERASER_XS: appState.eraserSize = 5.0f; break;
+        case ID_ERASER_S: appState.eraserSize = 10.0f; break;
+        case ID_ERASER_M: appState.eraserSize = 20.0f; break;
+        case ID_ERASER_L: appState.eraserSize = 40.0f; break;
+        case ID_ERASER_XL: appState.eraserSize = 80.0f; break;
+
+        case ID_TOOL_FUNC: {
+            g_FuncParams.expr[0] = 0;
             ShowFuncDialog(hWnd);
+            if (g_FuncParams.resultOK && wcslen(g_FuncParams.expr) > 0) {
+                char buf[256];
+                WideCharToMultiByte(CP_ACP, 0, g_FuncParams.expr, -1, buf, 256, NULL, NULL);
+                appState.funcExpr = string(buf);
+                appState.funcStart = _wtof(g_FuncParams.rangeStart);
+                appState.funcEnd = _wtof(g_FuncParams.rangeEnd);
+                appState.funcShowAxes = (g_FuncParams.showAxes == BST_CHECKED);
+                appState.funcClip = (g_FuncParams.clipRange == BST_CHECKED);
+                appState.currentTool = T_FUNC_PLACE;
+            }
             break;
+        }
+        case ID_ACTION_COLOR: SelectColor(hWnd); break;
         case ID_ACTION_CLEAR:
             for (auto s : appState.shapes) delete s;
             appState.shapes.clear();
             InvalidateRect(hWnd, NULL, FALSE);
             break;
+        case ID_ACTION_SAVE: {
+            OPENFILENAME ofn;
+            WCHAR szFile[260] = { 0 };
+            ZeroMemory(&ofn, sizeof(ofn));
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hWnd;
+            ofn.lpstrFile = szFile;
+            ofn.nMaxFile = sizeof(szFile);
+            ofn.lpstrFilter = L"PNG Image\0*.png\0JPEG Image\0*.jpg\0Bitmap\0*.bmp\0All\0*.*\0";
+            ofn.nFilterIndex = 1;
+            ofn.lpstrDefExt = L"png";
+            if (GetSaveFileName(&ofn) == TRUE) {
+                CLSID clsid;
+                if (wcsstr(szFile, L".jpg") || wcsstr(szFile, L".jpeg")) GetEncoderClsid(L"image/jpeg", &clsid);
+                else if (wcsstr(szFile, L".bmp")) GetEncoderClsid(L"image/bmp", &clsid);
+                else GetEncoderClsid(L"image/png", &clsid);
+
+                Bitmap bmp(hbmMem, NULL);
+                bmp.Save(szFile, &clsid, NULL);
+                MessageBox(hWnd, L"Изображение сохранено.", L"Успех", MB_OK);
+            }
+            break;
+        }
         case ID_ACTION_AUTORUN: {
-            // Простая переключалка (логика определения состояния опущена для краткости)
-            static bool autoRun = false;
-            autoRun = !autoRun;
-            SetAutorun(autoRun);
-            MessageBox(hWnd, autoRun ? L"Автозапуск включен" : L"Автозапуск выключен", L"Настройки", MB_OK);
+            static bool ar = false; ar = !ar;
+            SetAutorun(ar);
+            MessageBox(hWnd, ar ? L"Автозапуск вкл" : L"Автозапуск выкл", L"Info", MB_OK);
             break;
         }
         }
@@ -438,29 +648,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_LBUTTONDOWN: {
+        PointF worldPos = ScreenToWorld((int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam));
         appState.isDrawing = true;
-        appState.startPoint = Point((int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam));
-        appState.currentPoint = appState.startPoint;
+        appState.startPoint = worldPos;
+        appState.currentPoint = worldPos;
         SetCapture(hWnd);
 
         if (appState.currentTool == T_PEN || appState.currentTool == T_ERASER) {
             Color c = (appState.currentTool == T_ERASER) ? Color(255, 255, 255, 255) : appState.currentColor;
-            float w = (appState.currentTool == T_ERASER) ? 10.0f : appState.currentWidth;
-            PenShape* p = new PenShape(c, w);
-            p->AddPoint(appState.startPoint);
+            float w = (appState.currentTool == T_ERASER) ? appState.eraserSize : appState.currentWidth;
+            PenShape* p = new PenShape(c, w / appState.zoom);
+            p->AddPoint(worldPos);
             appState.shapes.push_back(p);
         }
         else if (appState.currentTool == T_FUNC_PLACE) {
-            // Фиксация функции
             appState.shapes.push_back(new FunctionShape(
-                appState.funcExpr,
-                appState.funcStart,
-                appState.funcEnd,
-                appState.startPoint, // Origin
-                Color(255, 0, 0, 255), // Синий цвет графика
-                2.0f
+                appState.funcExpr, appState.funcStart, appState.funcEnd,
+                worldPos, appState.currentColor, 2.0f / appState.zoom,
+                appState.funcShowAxes, appState.funcClip
             ));
-            appState.currentTool = T_PEN; // Возврат к кисти
+            appState.currentTool = T_PEN;
             appState.isDrawing = false;
             ReleaseCapture();
             InvalidateRect(hWnd, NULL, FALSE);
@@ -469,19 +676,35 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_MOUSEMOVE: {
-        appState.currentPoint = Point((int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam));
+        int mx = (int)(short)LOWORD(lParam);
+        int my = (int)(short)HIWORD(lParam);
 
-        if (appState.currentTool == T_FUNC_PLACE) {
-            // Режим выбора начала координат - просто перерисовка для предпросмотра
+        if (appState.isPanning) {
+            float dx = (float)(mx - appState.lastMousePos.X);
+            float dy = (float)(my - appState.lastMousePos.Y);
+            appState.offsetX += dx;
+            appState.offsetY += dy;
+            appState.lastMousePos.X = mx;
+            appState.lastMousePos.Y = my;
+            InvalidateRect(hWnd, NULL, FALSE);
+            return 0;
+        }
+
+        PointF worldPos = ScreenToWorld(mx, my);
+        appState.currentPoint = worldPos;
+
+        if (appState.currentTool == T_ERASER && !appState.isDrawing) {
             InvalidateRect(hWnd, NULL, FALSE);
         }
-        else if (appState.isDrawing) {
+
+        if (appState.isDrawing) {
             if (appState.currentTool == T_PEN || appState.currentTool == T_ERASER) {
-                // Добавляем точки к последней фигуре (PenShape)
                 Shape* s = appState.shapes.back();
-                ((PenShape*)s)->AddPoint(appState.currentPoint);
+                ((PenShape*)s)->AddPoint(worldPos);
             }
-            // Для остальных фигур перерисовка для предпросмотра
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+        else if (appState.currentTool == T_FUNC_PLACE) {
             InvalidateRect(hWnd, NULL, FALSE);
         }
         break;
@@ -493,13 +716,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ReleaseCapture();
 
             Color c = appState.currentColor;
-            float w = appState.currentWidth;
-            Rect r = Rect(
-                min(appState.startPoint.X, appState.currentPoint.X),
-                min(appState.startPoint.Y, appState.currentPoint.Y),
-                abs(appState.currentPoint.X - appState.startPoint.X),
-                abs(appState.currentPoint.Y - appState.startPoint.Y)
-            );
+            float w = appState.currentWidth / appState.zoom;
+
+            float l = min(appState.startPoint.X, appState.currentPoint.X);
+            float t = min(appState.startPoint.Y, appState.currentPoint.Y);
+            float rw = abs(appState.currentPoint.X - appState.startPoint.X);
+            float rh = abs(appState.currentPoint.Y - appState.startPoint.Y);
+            RectF r(l, t, rw, rh);
 
             if (appState.currentTool == T_LINE) {
                 appState.shapes.push_back(new LineShape(appState.startPoint, appState.currentPoint, c, w));
@@ -519,113 +742,117 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
 
-        // 1. Очистка буфера
         Graphics g(hdcMem);
-        g.Clear(Color(255, 255, 255, 255));
         g.SetSmoothingMode(SmoothingModeAntiAlias);
+        g.Clear(Color(255, 255, 255, 255));
 
-        // 2. Отрисовка сохраненных фигур
-        for (auto s : appState.shapes) {
-            s->Draw(g);
-        }
+        Matrix matrix;
+        matrix.Translate(appState.offsetX, appState.offsetY);
+        matrix.Scale(appState.zoom, appState.zoom);
+        g.SetTransform(&matrix);
 
-        // 3. Отрисовка предпросмотра (текущая операция)
-        Color previewColor = Color(128, 0, 0, 0); // Полупрозрачный
-        Pen previewPen(previewColor, 1.0f);
+        // Рисуем все фигуры
+        for (auto s : appState.shapes) s->Draw(g);
+
+        Color previewColor = Color(128, 100, 100, 100);
+        Pen previewPen(previewColor, 1.0f / appState.zoom);
         previewPen.SetDashStyle(DashStyleDot);
 
-        if (appState.currentTool == T_FUNC_PLACE) {
-            // Предпросмотр графика
-            Point origin = appState.currentPoint;
-            // Рисуем крестик осей
-            g.DrawLine(&previewPen, origin.X - 50, origin.Y, origin.X + 50, origin.Y);
-            g.DrawLine(&previewPen, origin.X, origin.Y - 50, origin.X, origin.Y + 50);
-
-            // Рисуем призрачный график
-            FunctionShape tempFunc(appState.funcExpr, appState.funcStart, appState.funcEnd, origin, Color(100, 0, 0, 255), 2.0f);
-            tempFunc.Draw(g);
+        // ПРЕДПРОСМОТР ЛАСТИКА
+        if (appState.currentTool == T_ERASER) {
+            float size = appState.eraserSize / appState.zoom;
+            float x = appState.currentPoint.X - size / 2;
+            float y = appState.currentPoint.Y - size / 2;
+            Pen eraserPen(Color(150, 0, 0, 0), 1.0f / appState.zoom);
+            g.DrawEllipse(&eraserPen, x, y, size, size);
         }
-        else if (appState.isDrawing) {
+
+        if (appState.currentTool == T_FUNC_PLACE) {
+            PointF origin = appState.currentPoint;
+            float axLen = 1000.0f / appState.zoom;
+            g.DrawLine(&previewPen, origin.X - axLen, origin.Y, origin.X + axLen, origin.Y);
+            g.DrawLine(&previewPen, origin.X, origin.Y - axLen, origin.X, origin.Y + axLen);
+
+            FunctionShape tmp(appState.funcExpr, appState.funcStart, appState.funcEnd, origin, Color(100, 0, 0, 200), 1.0f / appState.zoom, false, appState.funcClip);
+            tmp.Draw(g);
+        }
+        else if (appState.isDrawing && appState.currentTool != T_PEN && appState.currentTool != T_ERASER) {
             if (appState.currentTool == T_LINE) {
                 g.DrawLine(&previewPen, appState.startPoint, appState.currentPoint);
             }
-            else if (appState.currentTool == T_RECT || appState.currentTool == T_ELLIPSE) {
-                Rect r(
-                    min(appState.startPoint.X, appState.currentPoint.X),
-                    min(appState.startPoint.Y, appState.currentPoint.Y),
-                    abs(appState.currentPoint.X - appState.startPoint.X),
-                    abs(appState.currentPoint.Y - appState.startPoint.Y)
-                );
-                if (appState.currentTool == T_RECT) g.DrawRectangle(&previewPen, r);
-                else g.DrawEllipse(&previewPen, r);
+            else {
+                float l = min(appState.startPoint.X, appState.currentPoint.X);
+                float t = min(appState.startPoint.Y, appState.currentPoint.Y);
+                float w = abs(appState.currentPoint.X - appState.startPoint.X);
+                float h = abs(appState.currentPoint.Y - appState.startPoint.Y);
+                if (appState.currentTool == T_RECT) g.DrawRectangle(&previewPen, l, t, w, h);
+                else g.DrawEllipse(&previewPen, l, t, w, h);
             }
         }
 
-        // 4. Копирование буфера на экран
         BitBlt(hdc, 0, 0, cxClient, cyClient, hdcMem, 0, 0, SRCCOPY);
-
         EndPaint(hWnd, &ps);
         break;
     }
 
-    case WM_ERASEBKGND:
-        return 1; // Предотвращаем мерцание
+    case WM_ERASEBKGND: return 1;
 
     case WM_DESTROY:
         SelectObject(hdcMem, hbmOld);
         DeleteObject(hbmMem);
         DeleteDC(hdcMem);
-        GdiplusShutdown(gdiplusToken);
+        GdiplusShutdown(gdiToken);
         for (auto s : appState.shapes) delete s;
         PostQuitMessage(0);
         break;
 
-    default:
-        return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
+    default: return DefWindowProc(hWnd, msg, wParam, lParam);
+    } // Конец switch
     return 0;
-}
+} // Конец WndProc
 
 // -------------------------------------------------------------------------
-// 7. Точка входа
+// 8. Точка входа
 // -------------------------------------------------------------------------
-
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    // 1. Защита от повторного запуска
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int nCmdShow) {
     HANDLE hMutex = CreateMutex(NULL, TRUE, MUTEX_NAME);
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBox(NULL, L"Приложение уже запущено!", L"Ошибка", MB_OK | MB_ICONERROR);
-        return 0;
-    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
 
-    // 2. Регистрация класса окна
-    WNDCLASSEX wc = { 0 };
+    WNDCLASSEX wc;
     wc.cbSize = sizeof(WNDCLASSEX);
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = WndProc;
+    wc.cbClsExtra = 0;
+    wc.cbWndExtra = 0;
     wc.hInstance = hInstance;
+    wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
     wc.hCursor = LoadCursor(NULL, IDC_CROSS);
     wc.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    wc.lpszMenuName = NULL;
     wc.lpszClassName = L"MyPaintClass";
+    wc.hIconSm = LoadIcon(NULL, IDI_APPLICATION);
 
     RegisterClassEx(&wc);
 
-    // 3. Создание окна
-    HWND hWnd = CreateWindow(L"MyPaintClass", L"WinAPI C++ Paint (GDI+ & Functions)",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768,
-        NULL, NULL, hInstance, NULL);
+    HWND hWnd = CreateWindow(L"MyPaintClass", L"Super Paint (Final+)",
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1200, 800, NULL, NULL, hInstance, NULL);
 
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
 
-    // 4. Таблица акселераторов (Горячие клавиши)
     ACCEL accels[] = {
         { FCONTROL | FVIRTKEY, 'N', ID_ACTION_CLEAR },
+        { FCONTROL | FVIRTKEY, 'S', ID_ACTION_SAVE },
+        { FCONTROL | FVIRTKEY, 'P', ID_TOOL_PEN },
+        { FCONTROL | FVIRTKEY, 'L', ID_TOOL_LINE },
+        { FCONTROL | FVIRTKEY, 'R', ID_TOOL_RECT },
+        { FCONTROL | FVIRTKEY, 'E', ID_TOOL_ELLIPSE },
+        { FCONTROL | FVIRTKEY, 'D', ID_TOOL_ERASER },
         { FCONTROL | FVIRTKEY, 'F', ID_TOOL_FUNC }
     };
-    HACCEL hAccel = CreateAcceleratorTable(accels, 2);
+    HACCEL hAccel = CreateAcceleratorTable(accels, 8);
 
-    // 5. Цикл сообщений
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         if (!TranslateAccelerator(hWnd, hAccel, &msg)) {
@@ -633,7 +860,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             DispatchMessage(&msg);
         }
     }
-
     DestroyAcceleratorTable(hAccel);
     CloseHandle(hMutex);
     return (int)msg.wParam;
