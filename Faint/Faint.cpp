@@ -26,26 +26,31 @@ using namespace std;
 #define ID_TOOL_LINE      1002
 #define ID_TOOL_RECT      1003
 #define ID_TOOL_ELLIPSE   1004
-#define ID_TOOL_FUNC      1005
-#define ID_TOOL_ERASER    1006
-#define ID_ACTION_CLEAR   1007
-#define ID_ACTION_SAVE    1008
-#define ID_ACTION_COLOR   1009
-#define ID_ACTION_AUTORUN 1010
+#define ID_TOOL_TRIANGLE  1005 
+#define ID_TOOL_STAR      1006 
+#define ID_TOOL_FUNC      1007
+#define ID_TOOL_ERASER    1008
+#define ID_TOOL_IMAGE     1009 
 
-// Размеры ластика (должны идти по порядку для RadioItem)
-#define ID_ERASER_XS      1101
-#define ID_ERASER_S       1102
-#define ID_ERASER_M       1103
-#define ID_ERASER_L       1104
-#define ID_ERASER_XL      1105
+#define ID_ACTION_CLEAR   1101
+#define ID_ACTION_SAVE    1102
+#define ID_ACTION_OPEN    1103 
+#define ID_ACTION_COLOR   1104
+#define ID_ACTION_AUTORUN 1105
+
+// Размеры ластика
+#define ID_ERASER_XS      1201
+#define ID_ERASER_S       1202
+#define ID_ERASER_M       1203
+#define ID_ERASER_L       1204
+#define ID_ERASER_XL      1205
 
 #define ID_BTN_OK         2001
 #define ID_BTN_CANCEL     2002
 #define ID_CHK_AXIS       2003
 #define ID_CHK_CLIP       2004
 
-const wchar_t* MUTEX_NAME = L"Global\\MyGDIPlusPaintMutex_UltraV4";
+const wchar_t* MUTEX_NAME = L"Global\\MyGDIPlusPaintMutex_MegaV6";
 const wchar_t* REG_PATH = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const wchar_t* APP_NAME = L"MyGDIPlusPaint";
 
@@ -190,6 +195,65 @@ public:
     }
 };
 
+class TriangleShape : public Shape {
+public:
+    RectF rect;
+    TriangleShape(RectF r, Color c, float w) : Shape(c, w), rect(r) {}
+    void Draw(Graphics& g) override {
+        Pen pen(color, width);
+        PointF p1(rect.X + rect.Width / 2, rect.Y);
+        PointF p2(rect.X, rect.Y + rect.Height);
+        PointF p3(rect.X + rect.Width, rect.Y + rect.Height);
+
+        PointF points[] = { p1, p2, p3 };
+        g.DrawPolygon(&pen, points, 3);
+    }
+};
+
+class StarShape : public Shape {
+public:
+    RectF rect;
+    StarShape(RectF r, Color c, float w) : Shape(c, w), rect(r) {}
+    void Draw(Graphics& g) override {
+        Pen pen(color, width);
+        float cx = rect.X + rect.Width / 2;
+        float cy = rect.Y + rect.Height / 2;
+        float R = min(rect.Width, rect.Height) / 2;
+        float r = R * 0.4f;
+
+        PointF pnts[10];
+        double angle = -M_PI / 2;
+        double step = M_PI / 5;
+
+        for (int i = 0; i < 10; i++) {
+            float currR = (i % 2 == 0) ? R : r;
+            pnts[i] = PointF(cx + (float)(cos(angle) * currR), cy + (float)(sin(angle) * currR));
+            angle += step;
+        }
+        g.DrawPolygon(&pen, pnts, 10);
+    }
+};
+
+class ImageShape : public Shape {
+public:
+    RectF rect;
+    Bitmap* image;
+
+    ImageShape(const WCHAR* filename, RectF r) : Shape(Color(0, 0, 0), 0), rect(r) {
+        image = Bitmap::FromFile(filename);
+    }
+
+    ~ImageShape() {
+        if (image) delete image;
+    }
+
+    void Draw(Graphics& g) override {
+        if (image && image->GetLastStatus() == Ok) {
+            g.DrawImage(image, rect);
+        }
+    }
+};
+
 class FunctionShape : public Shape {
 public:
     string expression;
@@ -205,17 +269,14 @@ public:
     void Draw(Graphics& g) override {
         Pen pen(color, width);
 
-        // --- 1. Отрисовка осей ---
         if (drawAxes) {
             Pen axisPen(Color(200, 0, 0, 0), 1);
             Font font(L"Arial", 8);
             SolidBrush brush(Color(200, 0, 0, 0));
 
-            // Рисуем очень длинные оси
             g.DrawLine(&axisPen, PointF(origin.X - 100000, origin.Y), PointF(origin.X + 100000, origin.Y));
             g.DrawLine(&axisPen, PointF(origin.X, origin.Y - 100000), PointF(origin.X, origin.Y + 100000));
 
-            // Сетка и цифры (рисуем в разумных пределах вокруг Origin, чтобы не перегружать GDI)
             double step = 50.0;
             for (double x = -3000; x <= 3000; x += step) {
                 if (x == 0) continue;
@@ -233,35 +294,25 @@ public:
             }
         }
 
-        // --- 2. Определение границ отрисовки ---
         double start, end;
-
         if (clipToRange) {
-            // Если ограничение ВКЛЮЧЕНО: строго соблюдаем границы пользователя
             start = min(rangeStart, rangeEnd);
             end = max(rangeStart, rangeEnd);
-
-            // Устанавливаем Clipping Region для GDI+, чтобы обрезать "хвосты" линий и толщину кисти
-            // RectF задается в координатах мира (так как у нас применена трансформация в Graphics)
             RectF clipRect((float)(origin.X + start), (float)(origin.Y - 100000), (float)(end - start), 200000.0f);
             g.SetClip(clipRect, CombineModeIntersect);
         }
         else {
-            // Если ограничение ВЫКЛЮЧЕНО: рисуем очень далеко, чтобы при зуме/сдвиге график был
-            start = -50000.0;
-            end = 50000.0;
-            // Clipping не нужен
+            start = -50000.0; end = 50000.0;
         }
 
-        // --- 3. Вычисление и отрисовка ---
-        double step = 0.5;
+        double step = 0.05;
+
         std::vector<std::vector<PointF>> segments;
         std::vector<PointF> currentSegment;
 
         for (double xPix = start; xPix <= end; xPix += step) {
             double yVal = MathParser::Evaluate(expression, xPix);
 
-            // Игнорируем ошибки математики
             if (isnan(yVal) || isinf(yVal)) {
                 if (!currentSegment.empty()) { segments.push_back(currentSegment); currentSegment.clear(); }
                 continue;
@@ -270,7 +321,6 @@ public:
             float screenX = origin.X + (float)xPix;
             float screenY = origin.Y - (float)yVal;
 
-            // Разрыв линий при резких скачках (асимптоты)
             if (!currentSegment.empty()) {
                 float lastY = currentSegment.back().Y;
                 if (abs(screenY - lastY) > 2000.0f) {
@@ -278,7 +328,6 @@ public:
                     currentSegment.clear();
                 }
             }
-
             currentSegment.push_back(PointF(screenX, screenY));
         }
         if (!currentSegment.empty()) segments.push_back(currentSegment);
@@ -289,24 +338,21 @@ public:
             }
         }
 
-        // Сброс ограничения области
-        if (clipToRange) {
-            g.ResetClip();
-        }
+        if (clipToRange) g.ResetClip();
     }
 };
 
 // -------------------------------------------------------------------------
 // 4. Глобальное состояние
 // -------------------------------------------------------------------------
-enum Tool { T_PEN, T_LINE, T_RECT, T_ELLIPSE, T_ERASER, T_FUNC_PREPARE, T_FUNC_PLACE };
+enum Tool { T_PEN, T_LINE, T_RECT, T_ELLIPSE, T_TRIANGLE, T_STAR, T_ERASER, T_FUNC_PREPARE, T_FUNC_PLACE, T_IMAGE_PLACE };
 
 struct AppState {
     Tool currentTool = T_PEN;
     Color currentColor = Color(255, 0, 0, 0);
     float currentWidth = 2.0f;
     float eraserSize = 20.0f;
-    int eraserMenuID = ID_ERASER_M; // ID текущего пункта меню ластика для галочки
+    int eraserMenuID = ID_ERASER_M;
     std::vector<Shape*> shapes;
     bool isDrawing = false;
     bool isPanning = false;
@@ -319,6 +365,8 @@ struct AppState {
     double funcStart = -300, funcEnd = 300;
     bool funcShowAxes = true;
     bool funcClip = true;
+
+    wstring imagePath;
 
     float zoom = 1.0f;
     float offsetX = 0.0f;
@@ -359,6 +407,20 @@ PointF ScreenToWorld(int sx, int sy) {
     return PointF((sx - appState.offsetX) / appState.zoom, (sy - appState.offsetY) / appState.zoom);
 }
 
+// Проверка, включен ли автозапуск
+bool IsAutorunEnabled() {
+    HKEY hKey;
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, REG_PATH, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        if (RegQueryValueEx(hKey, APP_NAME, NULL, NULL, NULL, NULL) == ERROR_SUCCESS) {
+            RegCloseKey(hKey);
+            return true;
+        }
+        RegCloseKey(hKey);
+    }
+    return false;
+}
+
+// Переключение автозапуска
 void SetAutorun(bool enable) {
     HKEY hKey;
     if (RegOpenKeyEx(HKEY_CURRENT_USER, REG_PATH, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
@@ -389,27 +451,30 @@ void SelectColor(HWND hWnd) {
 }
 
 // -------------------------------------------------------------------------
-// 6. Диалог
+// 6. Диалог (Кнопка ОТМЕНА исправлена)
 // -------------------------------------------------------------------------
 LRESULT CALLBACK InputDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static HWND hEditExpr, hEditStart, hEditEnd, hChkAxis, hChkClip;
     switch (msg) {
     case WM_CREATE:
-        CreateWindow(L"STATIC", L"f(x) =", WS_VISIBLE | WS_CHILD, 10, 15, 40, 20, hWnd, NULL, NULL, NULL);
-        hEditExpr = CreateWindow(L"EDIT", L"x^2", WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL, 60, 12, 210, 20, hWnd, NULL, NULL, NULL);
+        CreateWindow(L"STATIC", L"f(x) =", WS_VISIBLE | WS_CHILD, 15, 20, 40, 20, hWnd, NULL, NULL, NULL);
+        hEditExpr = CreateWindow(L"EDIT", L"x^2", WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL, 60, 18, 240, 22, hWnd, NULL, NULL, NULL);
 
-        CreateWindow(L"STATIC", L"Диапазон X:", WS_VISIBLE | WS_CHILD, 10, 45, 80, 20, hWnd, NULL, NULL, NULL);
-        hEditStart = CreateWindow(L"EDIT", L"-300", WS_VISIBLE | WS_CHILD | WS_BORDER, 90, 45, 60, 20, hWnd, NULL, NULL, NULL);
-        hEditEnd = CreateWindow(L"EDIT", L"300", WS_VISIBLE | WS_CHILD | WS_BORDER, 160, 45, 60, 20, hWnd, NULL, NULL, NULL);
+        CreateWindow(L"STATIC", L"Диапазон X: от", WS_VISIBLE | WS_CHILD, 15, 55, 100, 20, hWnd, NULL, NULL, NULL);
+        hEditStart = CreateWindow(L"EDIT", L"-300", WS_VISIBLE | WS_CHILD | WS_BORDER, 120, 52, 60, 22, hWnd, NULL, NULL, NULL);
+        CreateWindow(L"STATIC", L"до", WS_VISIBLE | WS_CHILD, 190, 55, 20, 20, hWnd, NULL, NULL, NULL);
+        hEditEnd = CreateWindow(L"EDIT", L"300", WS_VISIBLE | WS_CHILD | WS_BORDER, 215, 52, 60, 22, hWnd, NULL, NULL, NULL);
 
-        hChkAxis = CreateWindow(L"BUTTON", L"Рисовать оси координат и сетку", WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX, 10, 75, 260, 20, hWnd, (HMENU)ID_CHK_AXIS, NULL, NULL);
+        hChkAxis = CreateWindow(L"BUTTON", L"Рисовать оси координат и сетку", WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX, 15, 85, 300, 20, hWnd, (HMENU)ID_CHK_AXIS, NULL, NULL);
         CheckDlgButton(hWnd, ID_CHK_AXIS, BST_CHECKED);
 
-        hChkClip = CreateWindow(L"BUTTON", L"Ограничить функцию диапазоном", WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX, 10, 100, 260, 20, hWnd, (HMENU)ID_CHK_CLIP, NULL, NULL);
+        hChkClip = CreateWindow(L"BUTTON", L"Ограничить функцию диапазоном", WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX, 15, 110, 300, 20, hWnd, (HMENU)ID_CHK_CLIP, NULL, NULL);
         CheckDlgButton(hWnd, ID_CHK_CLIP, BST_CHECKED);
 
-        CreateWindow(L"BUTTON", L"OK", WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON, 50, 140, 80, 25, hWnd, (HMENU)ID_BTN_OK, NULL, NULL);
-        CreateWindow(L"BUTTON", L"Отмена", WS_VISIBLE | WS_CHILD, 150, 140, 80, 25, hWnd, (HMENU)ID_BTN_CANCEL, NULL, NULL);
+        // Кнопка ОК
+        CreateWindow(L"BUTTON", L"OK", WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON, 60, 150, 90, 30, hWnd, (HMENU)ID_BTN_OK, NULL, NULL);
+        // Кнопка ОТМЕНА (ширина 100 пикселей)
+        CreateWindow(L"BUTTON", L"Отмена", WS_VISIBLE | WS_CHILD, 170, 150, 100, 30, hWnd, (HMENU)ID_BTN_CANCEL, NULL, NULL);
         break;
     case WM_COMMAND:
         if (LOWORD(wParam) == ID_BTN_OK) {
@@ -447,14 +512,13 @@ void ShowFuncDialog(HWND hParent) {
     g_FuncParams.resultOK = FALSE;
 
     HWND hDlg = CreateWindowEx(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST, L"FuncDlg", L"Параметры функции",
-        WS_VISIBLE | WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 300, 220, hParent, NULL, GetModuleHandle(NULL), NULL);
+        WS_VISIBLE | WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 340, 240, hParent, NULL, GetModuleHandle(NULL), NULL);
 
     RECT rcP, rcD; GetWindowRect(hParent, &rcP); GetWindowRect(hDlg, &rcD);
     SetWindowPos(hDlg, NULL, rcP.left + (rcP.right - rcP.left) / 2 - (rcD.right - rcD.left) / 2,
         rcP.top + (rcP.bottom - rcP.top) / 2 - (rcD.bottom - rcD.top) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
 
     EnableWindow(hParent, FALSE);
-
     MSG msg;
     bool done = false;
     while (!done && GetMessage(&msg, NULL, 0, 0)) {
@@ -468,7 +532,6 @@ void ShowFuncDialog(HWND hParent) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-
     EnableWindow(hParent, TRUE);
     SetForegroundWindow(hParent);
 }
@@ -489,8 +552,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         HMENU hMenu = CreateMenu();
         HMENU hFile = CreatePopupMenu();
+        AppendMenu(hFile, MF_STRING, ID_ACTION_OPEN, L"Открыть изображение... (Ctrl+O)");
         AppendMenu(hFile, MF_STRING, ID_ACTION_SAVE, L"Сохранить как... (Ctrl+S)");
-        AppendMenu(hFile, MF_STRING, ID_ACTION_AUTORUN, L"Автозапуск вкл/выкл");
+
+        // Логика чекбокса автозапуска при создании
+        bool autoRunEnabled = IsAutorunEnabled();
+        UINT flags = autoRunEnabled ? (MF_STRING | MF_CHECKED) : MF_STRING;
+        AppendMenu(hFile, flags, ID_ACTION_AUTORUN, L"Запускать при входе в Windows");
+
         AppendMenu(hFile, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFile, MF_STRING, ID_ACTION_CLEAR, L"Очистить (Ctrl+N)");
         AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFile, L"Файл");
@@ -500,6 +569,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         AppendMenu(hTools, MF_STRING, ID_TOOL_LINE, L"Линия (Ctrl+L)");
         AppendMenu(hTools, MF_STRING, ID_TOOL_RECT, L"Прямоугольник (Ctrl+R)");
         AppendMenu(hTools, MF_STRING, ID_TOOL_ELLIPSE, L"Эллипс (Ctrl+E)");
+        AppendMenu(hTools, MF_STRING, ID_TOOL_TRIANGLE, L"Треугольник (Ctrl+T)");
+        AppendMenu(hTools, MF_STRING, ID_TOOL_STAR, L"Звезда (Ctrl+Shift+S)");
+        AppendMenu(hTools, MF_SEPARATOR, 0, NULL);
         AppendMenu(hTools, MF_STRING, ID_TOOL_FUNC, L"График функции (Ctrl+F)");
 
         HMENU hEraserSz = CreatePopupMenu();
@@ -516,7 +588,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         AppendMenu(hMenu, MF_STRING, ID_ACTION_COLOR, L"Цвет");
         SetMenu(hWnd, hMenu);
 
-        // Устанавливаем начальную точку напротив выбранного ластика (Medium)
         CheckMenuRadioItem(hMenu, ID_ERASER_XS, ID_ERASER_XL, ID_ERASER_M, MF_BYCOMMAND);
         break;
     }
@@ -574,7 +645,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_COMMAND: {
         int id = LOWORD(wParam);
 
-        // Обработка выбора размера ластика для установки галочки (RadioItem)
         if (id >= ID_ERASER_XS && id <= ID_ERASER_XL) {
             appState.eraserMenuID = id;
             CheckMenuRadioItem(GetMenu(hWnd), ID_ERASER_XS, ID_ERASER_XL, id, MF_BYCOMMAND);
@@ -585,6 +655,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case ID_TOOL_LINE: appState.currentTool = T_LINE; break;
         case ID_TOOL_RECT: appState.currentTool = T_RECT; break;
         case ID_TOOL_ELLIPSE: appState.currentTool = T_ELLIPSE; break;
+        case ID_TOOL_TRIANGLE: appState.currentTool = T_TRIANGLE; break;
+        case ID_TOOL_STAR: appState.currentTool = T_STAR; break;
         case ID_TOOL_ERASER: appState.currentTool = T_ERASER; break;
 
         case ID_ERASER_XS: appState.eraserSize = 5.0f; break;
@@ -614,6 +686,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             appState.shapes.clear();
             InvalidateRect(hWnd, NULL, FALSE);
             break;
+
+        case ID_ACTION_OPEN: {
+            OPENFILENAME ofn;
+            WCHAR szFile[260] = { 0 };
+            ZeroMemory(&ofn, sizeof(ofn));
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hWnd;
+            ofn.lpstrFile = szFile;
+            ofn.nMaxFile = sizeof(szFile);
+            ofn.lpstrFilter = L"Images\0*.png;*.jpg;*.jpeg;*.bmp\0All\0*.*\0";
+            ofn.nFilterIndex = 1;
+            if (GetOpenFileName(&ofn) == TRUE) {
+                appState.imagePath = szFile;
+                appState.currentTool = T_IMAGE_PLACE;
+            }
+            break;
+        }
+
         case ID_ACTION_SAVE: {
             OPENFILENAME ofn;
             WCHAR szFile[260] = { 0 };
@@ -638,9 +728,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         }
         case ID_ACTION_AUTORUN: {
-            static bool ar = false; ar = !ar;
-            SetAutorun(ar);
-            MessageBox(hWnd, ar ? L"Автозапуск вкл" : L"Автозапуск выкл", L"Info", MB_OK);
+            bool newState = !IsAutorunEnabled();
+            SetAutorun(newState);
+            // Обновляем галочку в меню
+            CheckMenuItem(GetMenu(hWnd), ID_ACTION_AUTORUN, newState ? MF_CHECKED : MF_UNCHECKED);
             break;
         }
         }
@@ -704,7 +795,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             InvalidateRect(hWnd, NULL, FALSE);
         }
-        else if (appState.currentTool == T_FUNC_PLACE) {
+        else if (appState.currentTool == T_FUNC_PLACE || appState.currentTool == T_IMAGE_PLACE) {
             InvalidateRect(hWnd, NULL, FALSE);
         }
         break;
@@ -724,6 +815,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             float rh = abs(appState.currentPoint.Y - appState.startPoint.Y);
             RectF r(l, t, rw, rh);
 
+            // Обработка фигур
             if (appState.currentTool == T_LINE) {
                 appState.shapes.push_back(new LineShape(appState.startPoint, appState.currentPoint, c, w));
             }
@@ -733,6 +825,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             else if (appState.currentTool == T_ELLIPSE) {
                 appState.shapes.push_back(new EllipseShape(r, c, w));
             }
+            else if (appState.currentTool == T_TRIANGLE) {
+                appState.shapes.push_back(new TriangleShape(r, c, w));
+            }
+            else if (appState.currentTool == T_STAR) {
+                appState.shapes.push_back(new StarShape(r, c, w));
+            }
+            else if (appState.currentTool == T_IMAGE_PLACE) {
+                // Добавляем картинку
+                appState.shapes.push_back(new ImageShape(appState.imagePath.c_str(), r));
+                appState.currentTool = T_PEN; // Возврат к кисти
+            }
+
             InvalidateRect(hWnd, NULL, FALSE);
         }
         break;
@@ -785,8 +889,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 float t = min(appState.startPoint.Y, appState.currentPoint.Y);
                 float w = abs(appState.currentPoint.X - appState.startPoint.X);
                 float h = abs(appState.currentPoint.Y - appState.startPoint.Y);
-                if (appState.currentTool == T_RECT) g.DrawRectangle(&previewPen, l, t, w, h);
-                else g.DrawEllipse(&previewPen, l, t, w, h);
+                if (appState.currentTool == T_TRIANGLE || appState.currentTool == T_STAR) {
+                    g.DrawRectangle(&previewPen, l, t, w, h); // Рамка для сложных фигур
+                }
+                else if (appState.currentTool == T_IMAGE_PLACE) {
+                    g.DrawRectangle(&previewPen, l, t, w, h);
+                    // Можно добавить текст "Image"
+                }
+                else if (appState.currentTool == T_RECT) {
+                    g.DrawRectangle(&previewPen, l, t, w, h);
+                }
+                else if (appState.currentTool == T_ELLIPSE) {
+                    g.DrawEllipse(&previewPen, l, t, w, h);
+                }
             }
         }
 
@@ -807,9 +922,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
 
     default: return DefWindowProc(hWnd, msg, wParam, lParam);
-    } // Конец switch
+    }
     return 0;
-} // Конец WndProc
+}
 
 // -------------------------------------------------------------------------
 // 8. Точка входа
@@ -834,7 +949,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int nC
 
     RegisterClassEx(&wc);
 
-    HWND hWnd = CreateWindow(L"MyPaintClass", L"Super Paint (Final+)",
+    HWND hWnd = CreateWindow(L"MyPaintClass", L"Super Paint V5 (Import + Triangles)",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 1200, 800, NULL, NULL, hInstance, NULL);
 
@@ -844,14 +959,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int nC
     ACCEL accels[] = {
         { FCONTROL | FVIRTKEY, 'N', ID_ACTION_CLEAR },
         { FCONTROL | FVIRTKEY, 'S', ID_ACTION_SAVE },
+        { FCONTROL | FVIRTKEY, 'O', ID_ACTION_OPEN }, // Ctrl+O
         { FCONTROL | FVIRTKEY, 'P', ID_TOOL_PEN },
         { FCONTROL | FVIRTKEY, 'L', ID_TOOL_LINE },
         { FCONTROL | FVIRTKEY, 'R', ID_TOOL_RECT },
         { FCONTROL | FVIRTKEY, 'E', ID_TOOL_ELLIPSE },
+        { FCONTROL | FVIRTKEY, 'T', ID_TOOL_TRIANGLE },
+        { FCONTROL | FSHIFT | FVIRTKEY, 'S', ID_TOOL_STAR }, // Ctrl+Shift+S
         { FCONTROL | FVIRTKEY, 'D', ID_TOOL_ERASER },
         { FCONTROL | FVIRTKEY, 'F', ID_TOOL_FUNC }
     };
-    HACCEL hAccel = CreateAcceleratorTable(accels, 8);
+    HACCEL hAccel = CreateAcceleratorTable(accels, 11);
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
